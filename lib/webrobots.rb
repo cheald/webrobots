@@ -172,7 +172,7 @@ class WebRobots
   def get_robots_txt(site)
     key = site.hostname + ":" + site.port.to_s
     @cache_mutex.synchronize {
-      return @robotstxt[key] if @robotstxt.key? key
+      return @robotstxt[key] if @robotstxt[key]
     }
     fetch_robots_txt(key, site)
   end
