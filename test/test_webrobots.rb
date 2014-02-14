@@ -12,7 +12,7 @@ class TestWebRobots < Test::Unit::TestCase
           when 'http://site2.example.org/robots.txt'
             <<-'TXT'
 
-  
+
             TXT
           when 'http://site3.example.org/robots.txt'
             <<-'TXT'
@@ -23,7 +23,7 @@ class TestWebRobots < Test::Unit::TestCase
             <<-'TXT'
 
   #comment
-	
+
             TXT
           else
             raise "#{uri} is not supposed to be fetched"
@@ -584,7 +584,7 @@ Disallow: /
       assert  @doc.meta_robots('googlebot').include?('noarchive')
     end
   end
-  
+
   class Agent
     def initialize
       @robots = WebRobots.new 'agent', :http_get => method(:get)
@@ -624,7 +624,7 @@ Request-rate: 1/30
 Disallow: /util/
 
 Sitemap: http://site1.example.com/text/sitemap.xml
- 
+
 TXT
         when 'http://site2.example.com/robots.txt'
           <<-'TXT'
@@ -632,7 +632,7 @@ User-agent: *
 Request-rate: 1/30
 Disallow: /util/
 
-Sitemap: http://site2.example.com/text/sitemap.xml 
+Sitemap: http://site2.example.com/text/sitemap.xml
 TXT
         else
           raise "#{uri} is not supposed to be fetched"

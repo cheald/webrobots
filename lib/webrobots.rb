@@ -3,6 +3,7 @@ require 'webrobots/robotstxt'
 require 'uri'
 require 'net/https'
 require 'thread'
+require 'lru_redux'
 if defined?(Nokogiri)
   require 'webrobots/nokogiri'
 else
@@ -25,11 +26,18 @@ class WebRobots
   #   default behavior.  If +:ignore+ is given, WebRobots does
   #   nothing.  If a custom method, proc, or anything that responds to
   #   .call(delay, last_checked_at), it is called.
+  #
+  # * :max_cache_size => determines the maximum size of the robots cache.
+  #   If +nil+ is given, the cache is unbounded. If an integer
+  #   is given, then a LRU cache is created which holds cache entries.
+  #   This prevents WebRobots from consuming unbounded memory in long-running
+  #   processes.
   def initialize(user_agent, options = nil)
     @user_agent = user_agent
 
     options ||= {}
     @http_get = options[:http_get] || method(:http_get)
+    @max_cache_size = options.fetch(:max_cache_size, nil)
     crawl_delay_handler =
       case value = options[:crawl_delay] || :sleep
       when :ignore
@@ -45,19 +53,25 @@ class WebRobots
       end
 
     @parser = RobotsTxt::Parser.new(user_agent, crawl_delay_handler)
-    @parser_mutex = Mutex.new
-
+    @cache_mutex = Mutex.new
     @robotstxt = create_cache()
+    @conditions = {}
   end
 
   # :nodoc:
   def create_cache
-    Hash.new	# Must respond to [], []=, delete and clear.
+    if @max_cache_size
+      LruRedux::Cache.new(@max_cache_size)
+    else
+      Hash.new
+    end
   end
 
   # Flushes robots.txt cache.
   def flush_cache
-    @robotstxt.clear
+    @cache_mutex.synchronize {
+      @robotstxt.clear
+    }
   end
 
   # Returns the robot name initially given.
@@ -119,7 +133,7 @@ class WebRobots
   # Removes robots.txt cache for the site +url+.
   def reset(url)
     site, = split_uri(url)
-    @robotstxt.delete(site)
+    @robotstxt.delete(site.hostname + ":" + site.port.to_s)
   end
 
   private
@@ -156,18 +170,71 @@ class WebRobots
   end
 
   def get_robots_txt(site)
-    @robotstxt[site] ||= fetch_robots_txt(site)
+    key = site.hostname + ":" + site.port.to_s
+    @cache_mutex.synchronize {
+      return @robotstxt[key] if @robotstxt.key? key
+    }
+    fetch_robots_txt(key, site)
   end
 
-  def fetch_robots_txt(site)
-    begin
-      body = @http_get.call(site + 'robots.txt') or raise 'robots.txt unfetchable'
-    rescue => e
-      return RobotsTxt.unfetchable(site, e, @user_agent)
+  def fetch_robots_txt(key, site)
+    cond = nil
+    @cache_mutex.synchronize do
+      if @conditions.key? key
+        # If someone else is already working on this key, then yield the mutex
+        # and wait for them to finish
+        @conditions[key].wait(@cache_mutex)
+
+        # After they finish, if they resolved a record, return it
+        if @robotstxt[key]
+          return @robotstxt[key]
+        end
+
+        # Otherwise, continue
+      end
+
+      # Create a new ConditionVariable that other threads will wait on
+      cond = @conditions[key] = ConditionVariable.new
     end
-    @parser_mutex.synchronize {
-      @parser.parse!(body, site)
-    }
+
+    begin
+      # Perform the call. We don't want this synchronized as it will cause
+      # us to only be able to fetch one robots.txt at a time.
+      body, result = nil, nil
+      begin
+        body = @http_get.call(site + 'robots.txt')
+      rescue => e
+        result = RobotsTxt.unfetchable(site, e, @user_agent)
+      end
+
+      # Re-acquire the mutex. All other threads should be waiting on our condition
+      # variable above, so we should be able to re-acquire this mutex without significant contention.
+      @cache_mutex.synchronize do
+        # Parse the result
+        if result.nil?
+          begin
+            raise 'robots.txt unfetchable' if body.nil?
+            # The parser is not threadsafe, so it's important that parsing happen in a critical section.
+            result = @parser.parse!(body, site)
+          rescue => e
+            result = RobotsTxt.unfetchable(site, e, @user_agent)
+          end
+        end
+
+        # Set the result
+        @robotstxt[key] = result
+
+        # Delete the condition variable (so that other threads can't wait on it)
+        @conditions.delete(key)
+        cond.broadcast if cond
+
+        # Return the parse result
+        return result
+      end
+    ensure
+      # Ensure we broadcast to all waiting threads, waking them up one at a time
+      cond.broadcast if cond
+    end
   end
 
   def http_get(uri)
