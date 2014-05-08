@@ -3,7 +3,7 @@ require 'webrobots/robotstxt'
 require 'uri'
 require 'net/https'
 require 'thread'
-require 'lru_redux'
+require 'rufus-lru'
 if defined?(Nokogiri)
   require 'webrobots/nokogiri'
 else
@@ -61,7 +61,7 @@ class WebRobots
   # :nodoc:
   def create_cache
     if @max_cache_size
-      LruRedux::Cache.new(@max_cache_size)
+      Rufus::Lru::Hash.new(@max_cache_size)
     else
       Hash.new
     end
